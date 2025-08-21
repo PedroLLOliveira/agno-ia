@@ -4,6 +4,9 @@ from agno.playground import Playground
 from agno.storage.sqlite import SqliteStorage
 from agno.tools.duckduckgo import DuckDuckGoTools
 from agno.tools.reasoning import ReasoningTools
+from agno.knowledge.markdown import MarkdownKnowledgeBase
+from agno.vectordb.lancedb import LanceDb, SearchType
+from agno.embedder.openai import OpenAIEmbedder
 
 # carrega variaveis de api_key
 from dotenv import load_dotenv
@@ -12,7 +15,7 @@ load_dotenv()
 # Banco local para histórico dos agentes
 agent_storage: str = "tmp/agents.db"
 
-# 1) Agente de Pesquisa: levanta dados sobre carreiras, mercado, graduações e trilhas
+# 1) Agente de Pesquisa Web
 web_agent = Agent(
     name="Career Web Agent",
     model=OpenAIChat(id="gpt-4o"),
@@ -30,22 +33,18 @@ web_agent = Agent(
     markdown=True,
 )
 
-# 2) Agente de Análise Vocacional: interpreta o perfil do usuário e recomenda carreiras
+# 2) Agente de Análise Vocacional
 vocational_analyst = Agent(
     name="Vocational Analyst Agent",
     model=OpenAIChat(id="gpt-4o"),
     tools=[ReasoningTools(add_instructions=True)],
     instructions=[
-        # Entrada esperada
         "Receber do usuário: interesses, habilidades, valores de trabalho, experiências e restrições (ex.: tempo, orçamento).",
-        # Método
         "Mapear o perfil para RIASEC (Realistic, Investigative, Artistic, Social, Enterprising, Conventional).",
         "Identificar top 3 áreas de afinidade e justificar com base nos sinais fornecidos pelo usuário.",
-        # Saída estruturada
         "Gerar uma tabela com: Carreira | Por que combina | Passos de curto prazo (30-60 dias) | Recursos para aprender.",
         "Sugerir 3-5 trilhas de estudo (gratuitas e pagas), com carga horária estimada e ordem sugerida.",
         "Listar riscos/pressupostos (ex.: saturação de mercado, necessidade de portfolio).",
-        # Integração com o Web Agent
         "Quando possível, peça ao usuário para o Web Agent buscar dados adicionais (salários, demanda, certificações), "
         "e depois incorpore as fontes na análise final, citando-as."
     ],
@@ -56,10 +55,39 @@ vocational_analyst = Agent(
     markdown=True,
 )
 
-# Playground com os dois agentes
-playground_app = Playground(agents=[web_agent, vocational_analyst])
+markdown_kb = MarkdownKnowledgeBase(
+    path="./knowledge_base.md",
+    vector_db=LanceDb(
+        uri="tmp/lancedb",
+        table_name="local_md_docs",
+        search_type=SearchType.hybrid,
+        embedder=OpenAIEmbedder(
+            id="text-embedding-3-small",
+            dimensions=1536,
+        ),
+    ),
+)
+
+docs_agent = Agent(
+    name="Docs Agent",
+    model=OpenAIChat(id="gpt-4o"),
+    knowledge=markdown_kb,
+    search_knowledge=True,
+    instructions=[
+        "Responda sempre com base na documentação local.",
+        "Cite o arquivo markdown usado como fonte.",
+        "Se não encontrar nada relevante, oriente o usuário a consultar o Web Agent."
+    ],
+    storage=SqliteStorage(table_name="docs_agent", db_file=agent_storage),
+    add_datetime_to_instructions=True,
+    add_history_to_messages=True,
+    num_history_responses=5,
+    markdown=True,
+)
+
+playground_app = Playground(agents=[web_agent, vocational_analyst, docs_agent])
 app = playground_app.get_app()
 
 if __name__ == "__main__":
-    # Rode: uvicorn playground:app --reload
+    docs_agent.knowledge.load(recreate=False)
     playground_app.serve("playground:app", reload=True)
